@@ -57,23 +57,51 @@ class DatabaseManager:
         Raises:
             StorageError: файл повреждён или недоступен.
         """
-        path, empty = self._resolve(collection)
+        return self.read_file(*self._resolve(collection))
+
+    def write(self, collection: str, data: Any) -> None:
+        """Атомарно записать коллекцию (tmp-файл → rename)."""
+        path, _ = self._resolve(collection)
+        self.write_file(path, data)
+
+    @contextmanager
+    def transaction(self, collection: str) -> Iterator[Any]:
+        """Безопасное «чтение → модификация → запись».
+
+        Данные записываются, только если блок завершился без исключения::
+
+            with db.transaction("users") as users:
+                users.append(record)
+        """
+        with self.file_transaction(*self._resolve(collection)) as data:
+            yield data
+
+    # --- операции над произвольным файлом (используются Parser Service) ------
+
+    @staticmethod
+    def read_file(path: Path, empty: Any = None) -> Any:
+        """Прочитать JSON-файл; отсутствующий или пустой файл — empty.
+
+        Raises:
+            StorageError: файл повреждён или недоступен.
+        """
         try:
-            text = path.read_text(encoding="utf-8")
+            text = Path(path).read_text(encoding="utf-8")
         except FileNotFoundError:
-            return empty
+            return copy.deepcopy(empty)
         except OSError as exc:
             raise StorageError(str(path), exc.strerror or str(exc)) from exc
         if not text.strip():
-            return empty
+            return copy.deepcopy(empty)
         try:
             return json.loads(text)
         except json.JSONDecodeError as exc:
             raise StorageError(str(path), "некорректный JSON") from exc
 
-    def write(self, collection: str, data: Any) -> None:
-        """Атомарно записать коллекцию (tmp-файл → rename)."""
-        path, _ = self._resolve(collection)
+    @staticmethod
+    def write_file(path: Path, data: Any) -> None:
+        """Атомарно записать JSON-файл: временный файл → os.replace."""
+        path = Path(path)
         tmp_path = path.with_name(path.name + TMP_SUFFIX)
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -87,14 +115,8 @@ class DatabaseManager:
             raise StorageError(str(path), exc.strerror or str(exc)) from exc
 
     @contextmanager
-    def transaction(self, collection: str) -> Iterator[Any]:
-        """Безопасное «чтение → модификация → запись».
-
-        Данные записываются, только если блок завершился без исключения::
-
-            with db.transaction("users") as users:
-                users.append(record)
-        """
-        data = self.read(collection)
+    def file_transaction(self, path: Path, empty: Any = None) -> Iterator[Any]:
+        """«Чтение → модификация → запись» для произвольного JSON-файла."""
+        data = self.read_file(path, empty)
         yield data
-        self.write(collection, data)
+        self.write_file(path, data)

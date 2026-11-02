@@ -25,7 +25,8 @@ from valutatrade_hub.core.exceptions import (
 )
 from valutatrade_hub.core.models import User
 from valutatrade_hub.core.utils import BASE_CURRENCY, format_rate
-from valutatrade_hub.logging_config import setup_logging
+from valutatrade_hub.logging_config import parser_console_output, setup_logging
+from valutatrade_hub.parser_service.updater import SOURCE_KEYS
 
 PROMPT = "> "
 EXIT_COMMANDS = frozenset({"exit", "quit"})
@@ -36,6 +37,8 @@ DEFAULT_DECIMALS = 2
 AMOUNT_ERROR = "'amount' должен быть положительным числом"
 API_ERROR_HINT = "Повторите попытку позже или проверьте подключение к сети."
 TOP_UP_HINT = "Пополните USD: buy --currency USD --amount <сумма>"
+PARSER_LOG_HINT = "logs/parser.log"
+CACHE_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
 COMMANDS_HELP = (
     ("register --username <имя> --password <пароль>", "регистрация"),
@@ -45,6 +48,8 @@ COMMANDS_HELP = (
     ("buy --currency <код> --amount <кол-во>", "купить валюту (оплата из USD)"),
     ("sell --currency <код> --amount <кол-во>", "продать валюту (выручка в USD)"),
     ("get-rate --from <код> --to <код>", "текущий курс валют"),
+    ("update-rates [--source coingecko|exchangerate]", "обновить курсы из внешних API"),
+    ("show-rates [--currency <код>] [--top <N>] [--base <код>]", "курсы из локального кеша"),
     ("currencies", "список поддерживаемых валют"),
     ("help [команда]", "справка"),
     ("exit", "выход из программы"),
@@ -185,6 +190,38 @@ def _cmd_get_rate(args: argparse.Namespace, session: CliSession) -> None:
     print(f"Обратный курс {info.to_code}→{info.from_code}: {format_rate(info.inverse_rate)}")
 
 
+def _cmd_update_rates(args: argparse.Namespace, session: CliSession) -> None:
+    with parser_console_output():
+        result = usecases.update_rates(args.source)
+    if result.has_errors:
+        print(f"Update completed with errors. Check {PARSER_LOG_HINT} for details.")
+        print(f"Total rates updated: {result.total_rates}. Last refresh: {result.last_refresh}")
+    else:
+        print(
+            f"Update successful. Total rates updated: {result.total_rates}. "
+            f"Last refresh: {result.last_refresh}"
+        )
+
+
+def _cmd_show_rates(args: argparse.Namespace, session: CliSession) -> None:
+    view = usecases.show_rates(args.currency, args.top, args.base)
+    refreshed = (
+        view.last_refresh.astimezone().strftime(CACHE_TIME_FORMAT) if view.last_refresh else "—"
+    )
+    print(f"Rates from cache (updated at {refreshed}):")
+    table = PrettyTable(["Пара", "Курс", "Обновлено", "Источник"])
+    table.align["Курс"] = "r"
+    for row in view.rows:
+        updated = row.updated_at.astimezone().strftime(CACHE_TIME_FORMAT)
+        table.add_row([row.pair, format_rate(row.rate), updated, row.source or "—"])
+    print(table)
+    if view.is_stale:
+        print(
+            f"Внимание: данные старше {view.ttl_seconds} с и могли устареть. "
+            "Выполните 'update-rates'."
+        )
+
+
 def _cmd_currencies(args: argparse.Namespace, session: CliSession) -> None:
     table = PrettyTable(["Код", "Тип", "Описание"])
     table.align["Описание"] = "l"
@@ -236,6 +273,14 @@ def build_parser() -> tuple[_ArgumentParser, dict[str, _ArgumentParser]]:
     rate = add("get-rate", _cmd_get_rate, "Показать курс одной валюты к другой.")
     rate.add_argument("--from", dest="from_code", required=True, help="исходная валюта")
     rate.add_argument("--to", dest="to_code", required=True, help="целевая валюта")
+
+    update = add("update-rates", _cmd_update_rates, "Обновить курсы из внешних API.")
+    update.add_argument("--source", choices=SOURCE_KEYS, help="только один источник")
+
+    rates = add("show-rates", _cmd_show_rates, "Показать курсы из локального кеша.")
+    rates.add_argument("--currency", help="только пары с этой валютой")
+    rates.add_argument("--top", type=int, help="N самых дорогих криптовалют")
+    rates.add_argument("--base", help="пересчитать к базовой валюте")
 
     add("currencies", _cmd_currencies, "Показать поддерживаемые валюты.")
 
@@ -298,6 +343,8 @@ def _run_command(
     except ApiRequestError as exc:
         print(exc)
         print(API_ERROR_HINT)
+        if name == "update-rates":
+            print(f"Подробности: {PARSER_LOG_HINT}")
     except (ValutaTradeError, ValueError) as exc:
         print(exc)
     except Exception as exc:
