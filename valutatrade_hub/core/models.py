@@ -1,4 +1,4 @@
-"""Доменные модели: пользователь, кошелёк и портфель."""
+"""Модели: пользователь, кошелёк и портфель."""
 
 import hashlib
 import hmac
@@ -40,7 +40,7 @@ class User:
             raise ValueError("Хеш пароля и соль не могут быть пустыми")
 
         self._user_id = user_id
-        self.username = username  # проходит через сеттер с валидацией
+        self.username = username
         self._hashed_password = hashed_password
         self._salt = salt
         self._registration_date = registration_date
@@ -157,7 +157,7 @@ class Wallet:
 
     def __init__(self, currency_code: str, balance: float = 0.0) -> None:
         self.currency_code = validate_currency_code(currency_code)
-        self.balance = balance  # проходит через сеттер с валидацией
+        self.balance = balance
 
     @property
     def balance(self) -> float:

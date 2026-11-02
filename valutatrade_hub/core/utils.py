@@ -6,8 +6,6 @@ BASE_CURRENCY = "USD"
 MIN_CODE_LENGTH = 2
 MAX_CODE_LENGTH = 5
 
-# Фиксированные курсы-заглушки (1 единица валюты = rate USD).
-# Используются, пока не подключён Parser Service / локальный кеш rates.json.
 DEFAULT_EXCHANGE_RATES: dict[str, float] = {
     "EUR_USD": 1.0786,
     "GBP_USD": 1.2650,
