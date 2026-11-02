@@ -16,6 +16,7 @@ dev = ["ruff>=0.6"]
 [project.scripts]
 project = "valutatrade_hub.cli.interface:main"
 valutatrade = "valutatrade_hub.cli.interface:main"
+valutatrade-parser = "valutatrade_hub.parser_service.scheduler:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -39,9 +40,11 @@ portfolios_file = "data/portfolios.json"
 rates_file = "data/rates.json"
 exchange_rates_file = "data/exchange_rates.json"
 rates_ttl_seconds = 300
+rates_update_interval_seconds = 300
 default_base_currency = "USD"
 log_dir = "logs"
 actions_log_file = "logs/actions.log"
+parser_log_file = "logs/parser.log"
 log_level = "INFO"
 log_format = "%(levelname)s %(asctime)s %(message)s"
 log_date_format = "%Y-%m-%dT%H:%M:%S"

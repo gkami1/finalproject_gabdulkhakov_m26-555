@@ -13,8 +13,9 @@
     data_dir, users_file, portfolios_file, rates_file, exchange_rates_file —
         пути к JSON-хранилищу;
     rates_ttl_seconds — срок свежести курсов в кеше rates.json;
+    rates_update_interval_seconds — период планировщика Parser Service;
     default_base_currency — базовая валюта show-portfolio по умолчанию;
-    log_dir, actions_log_file, log_level, log_format, log_date_format,
+    log_dir, actions_log_file, parser_log_file, log_level, log_format, log_date_format,
     log_max_bytes, log_backup_count — параметры логирования.
 """
 
@@ -37,6 +38,8 @@ DEFAULTS: dict[str, Any] = {
     "default_base_currency": "USD",
     "log_dir": "logs",
     "actions_log_file": "logs/actions.log",
+    "parser_log_file": "logs/parser.log",
+    "rates_update_interval_seconds": 300,
     "log_level": "INFO",
     "log_format": "%(levelname)s %(asctime)s %(message)s",
     "log_date_format": "%Y-%m-%dT%H:%M:%S",
