@@ -1,5 +1,30 @@
- .venv
- dist/
- __pycache__/
- *.egg-info
- 
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Ruff / линтеры
+.ruff_cache/
+.mypy_cache/
+
+# Временные файлы атомарной записи
+data/*.tmp
+
+# Логи
+logs/*
+!logs/.gitkeep
+
+# Секреты (API-ключ ExchangeRate-API)
+.env
+.env.*
+!.env.example
+
+# IDE / ОС
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
