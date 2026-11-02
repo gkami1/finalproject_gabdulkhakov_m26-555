@@ -5,6 +5,7 @@ from numbers import Real
 BASE_CURRENCY = "USD"
 MIN_CODE_LENGTH = 2
 MAX_CODE_LENGTH = 5
+BALANCE_PRECISION = 8  # знаков после запятой при сохранении баланса
 
 DEFAULT_EXCHANGE_RATES: dict[str, float] = {
     "EUR_USD": 1.0786,

@@ -8,6 +8,7 @@ from numbers import Real
 from typing import Any
 
 from valutatrade_hub.core.utils import (
+    BALANCE_PRECISION,
     BASE_CURRENCY,
     convert,
     validate_amount,
@@ -196,7 +197,10 @@ class Wallet:
 
     def to_dict(self) -> dict[str, Any]:
         """Словарь для сохранения в составе портфеля."""
-        return {"currency_code": self.currency_code, "balance": self._balance}
+        return {
+            "currency_code": self.currency_code,
+            "balance": round(self._balance, BALANCE_PRECISION),
+        }
 
     def __repr__(self) -> str:
         return f"Wallet({self.currency_code!r}, balance={self._balance})"
@@ -272,7 +276,8 @@ class Portfolio:
         return {
             "user_id": self._user_id,
             "wallets": {
-                code: {"balance": wallet.balance} for code, wallet in self._wallets.items()
+                code: {"balance": round(wallet.balance, BALANCE_PRECISION)}
+                for code, wallet in self._wallets.items()
             },
         }
 
