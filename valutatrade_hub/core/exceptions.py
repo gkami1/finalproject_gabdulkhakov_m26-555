@@ -114,3 +114,20 @@ class StorageError(ValutaTradeError):
 
     def __init__(self, path: str, reason: str) -> None:
         super().__init__(f"Ошибка хранилища {path}: {reason}")
+
+
+class RatesCacheEmptyError(ValutaTradeError):
+    """Локальный кеш курсов пуст или не найден."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            "Локальный кеш курсов пуст. Выполните 'update-rates', чтобы загрузить данные."
+        )
+
+
+class RateNotInCacheError(ValutaTradeError):
+    """В кеше нет курсов для запрошенной валюты."""
+
+    def __init__(self, code: str) -> None:
+        self.code = code
+        super().__init__(f"Курс для '{code}' не найден в кеше.")

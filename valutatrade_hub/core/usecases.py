@@ -8,6 +8,9 @@ CLI вызывает только функции этого модуля и са
     DatabaseManager — всё чтение/запись users, portfolios и rates
         (безопасный цикл «чтение → модификация → запись» через transaction()).
 
+Свежие курсы получает Parser Service (RatesUpdater) — по команде
+update-rates или автоматически, когда кеш rates.json старше TTL.
+
 Операции register/login/buy/sell логируются декоратором @log_action.
 Ошибки — доменные исключения из core.exceptions; ошибки формата ввода
 (сумма, длина пароля, пустое имя) — ValueError.
@@ -19,6 +22,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from valutatrade_hub.core.currencies import (
+    CryptoCurrency,
     Currency,
     get_currency,
     get_supported_codes,
@@ -28,6 +32,8 @@ from valutatrade_hub.core.exceptions import (
     AuthRequiredError,
     CurrencyNotFoundError,
     InvalidPasswordError,
+    RateNotInCacheError,
+    RatesCacheEmptyError,
     RateUnavailableError,
     UnknownBaseCurrencyError,
     UserAlreadyExistsError,
@@ -37,15 +43,16 @@ from valutatrade_hub.core.exceptions import (
 from valutatrade_hub.core.models import Portfolio, User
 from valutatrade_hub.core.utils import (
     BASE_CURRENCY,
-    DEFAULT_EXCHANGE_RATES,
     make_pair_key,
     validate_amount,
+    validate_currency_code,
 )
 from valutatrade_hub.decorators import log_action
 from valutatrade_hub.infra.database import DatabaseManager
 from valutatrade_hub.infra.settings import SettingsLoader
+from valutatrade_hub.parser_service.updater import UpdateResult, create_updater
 
-STUB_RATES_SOURCE = "StubRates"
+PAIR_SEPARATOR = "_"
 
 logger = logging.getLogger(__name__.replace("valutatrade_hub", "valutatrade", 1))
 
@@ -97,6 +104,26 @@ class PortfolioRow:
     currency_code: str
     balance: float
     value_in_base: float
+
+
+@dataclass(frozen=True)
+class RateRow:
+    """Строка show-rates: пара из кеша."""
+
+    pair: str
+    rate: float
+    updated_at: datetime
+    source: str
+
+
+@dataclass(frozen=True)
+class RatesView:
+    """Отчёт show-rates."""
+
+    rows: tuple[RateRow, ...]
+    last_refresh: datetime | None
+    is_stale: bool
+    ttl_seconds: int
 
 
 @dataclass(frozen=True)
@@ -252,38 +279,14 @@ def _is_fresh(updated_at: datetime) -> bool:
     return (_utc_now() - updated_at).total_seconds() <= ttl
 
 
-def _fetch_rates_from_source() -> tuple[dict[str, float], str]:
-    """Получить свежие курсы {"BTC_USD": 59337.21, ...} и имя источника.
-
-    Пока Parser Service не подключён, возвращает курсы-заглушки.
-
-    Raises:
-        ApiRequestError: источник недоступен.
-    """
-    return dict(DEFAULT_EXCHANGE_RATES), STUB_RATES_SOURCE
-
-
 def _refresh_rates_cache() -> dict[str, Any]:
-    """Обновить rates.json из источника и вернуть новый кеш.
-
-    Запись пары «побеждает», только если она не старше уже сохранённой.
+    """Обновить rates.json через Parser Service и вернуть новый кеш.
 
     Raises:
-        ApiRequestError: источник недоступен.
+        ApiRequestError: ни один источник курсов не ответил.
     """
-    fresh_rates, source = _fetch_rates_from_source()
-    now = _utc_now()
-    with DatabaseManager().transaction("rates") as cache:
-        pairs = cache.setdefault("pairs", {})
-        for pair, rate in fresh_rates.items():
-            current = pairs.get(pair)
-            if current and _parse_timestamp(current["updated_at"]) > now:
-                continue
-            pairs[pair] = {"rate": rate, "updated_at": _to_iso(now), "source": source}
-        cache["source"] = source
-        cache["last_refresh"] = _to_iso(now)
-    logger.info("Кеш курсов обновлён из %s: %d пар", source, len(fresh_rates))
-    return cache
+    create_updater().run_update()
+    return DatabaseManager().read("rates")
 
 
 def _resolve_rate(from_code: str, to_code: str) -> RateInfo | None:
@@ -323,6 +326,107 @@ def get_rate(from_code: str, to_code: str) -> RateInfo:
     if info is None:
         raise RateUnavailableError(source, target)
     return info
+
+
+@log_action("UPDATE_RATES")
+def update_rates(source: str | None = None) -> UpdateResult:
+    """Немедленно обновить курсы из всех источников или из одного.
+
+    Raises:
+        ValueError: неизвестный источник.
+        ApiRequestError: ни один источник не ответил.
+    """
+    return create_updater(source).run_update()
+
+
+def _is_crypto(code: str) -> bool:
+    try:
+        return isinstance(get_currency(code), CryptoCurrency)
+    except CurrencyNotFoundError:
+        return False
+
+
+def _cache_rows(pairs: dict[str, Any], base: str) -> list[RateRow]:
+    """Пары кеша, при необходимости пересчитанные к другой базовой валюте."""
+    rows = []
+    if base == BASE_CURRENCY:
+        for pair, entry in pairs.items():
+            rate, updated_at = _pair_entry(pairs, *pair.split(PAIR_SEPARATOR))
+            rows.append(RateRow(pair, rate, updated_at, entry.get("source", "")))
+        return rows
+
+    try:
+        base_to_usd, base_ts = _pair_entry(pairs, base, BASE_CURRENCY)
+    except KeyError:
+        raise RateNotInCacheError(base) from None
+    rows.append(RateRow(make_pair_key(BASE_CURRENCY, base), 1.0 / base_to_usd, base_ts, ""))
+    for pair, entry in pairs.items():
+        from_code, to_code = pair.split(PAIR_SEPARATOR)
+        if to_code != BASE_CURRENCY or from_code == base:
+            continue
+        rate, updated_at = _pair_entry(pairs, from_code, BASE_CURRENCY)
+        rows.append(
+            RateRow(
+                make_pair_key(from_code, base),
+                rate / base_to_usd,
+                min(updated_at, base_ts),
+                entry.get("source", ""),
+            )
+        )
+    return rows
+
+
+def show_rates(
+    currency: str | None = None, top: int | None = None, base: str | None = None
+) -> RatesView:
+    """Курсы из локального кеша с фильтрами (без обращения к API).
+
+    Args:
+        currency: показать только пары с этой валютой.
+        top: показать N самых дорогих криптовалют.
+        base: пересчитать курсы к другой базовой валюте.
+
+    Raises:
+        RatesCacheEmptyError: кеш пуст.
+        RateNotInCacheError: для валюты нет курсов в кеше.
+        UnknownBaseCurrencyError: базовая валюта неизвестна.
+        ValueError: top не положительный.
+    """
+    cache = DatabaseManager().read("rates")
+    pairs = cache.get("pairs") or {}
+    if not pairs:
+        raise RatesCacheEmptyError()
+    if top is not None and top <= 0:
+        raise ValueError("'top' должен быть положительным целым числом")
+
+    base_code = BASE_CURRENCY
+    if base is not None:
+        try:
+            base_code = get_currency(base).code
+        except CurrencyNotFoundError as exc:
+            raise UnknownBaseCurrencyError(exc.code) from None
+    rows = _cache_rows(pairs, base_code)
+
+    if currency is not None:
+        try:
+            code = validate_currency_code(currency)
+        except ValueError:
+            raise RateNotInCacheError(str(currency).strip()) from None
+        rows = [row for row in rows if code in row.pair.split(PAIR_SEPARATOR)]
+        if not rows:
+            raise RateNotInCacheError(code)
+
+    if top is not None:
+        crypto = [row for row in rows if _is_crypto(row.pair.split(PAIR_SEPARATOR)[0])]
+        rows = sorted(crypto, key=lambda row: row.rate, reverse=True)[:top]
+    else:
+        rows.sort(key=lambda row: row.pair)
+
+    ttl = SettingsLoader().get("rates_ttl_seconds")
+    last_refresh = cache.get("last_refresh")
+    refreshed_at = _parse_timestamp(last_refresh) if last_refresh else None
+    is_stale = refreshed_at is None or not _is_fresh(refreshed_at)
+    return RatesView(tuple(rows), refreshed_at, is_stale, ttl)
 
 
 def _rate_to_base(currency_code: str) -> float:
