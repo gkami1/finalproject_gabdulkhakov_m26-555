@@ -6,6 +6,8 @@ BASE_CURRENCY = "USD"
 MIN_CODE_LENGTH = 2
 MAX_CODE_LENGTH = 5
 BALANCE_PRECISION = 8  # знаков после запятой при сохранении баланса
+LARGE_RATE_THRESHOLD = 100
+UNIT_RATE_THRESHOLD = 1
 
 DEFAULT_EXCHANGE_RATES: dict[str, float] = {
     "EUR_USD": 1.0786,
@@ -96,3 +98,12 @@ def convert(
 ) -> float:
     """Перевести сумму из одной валюты в другую по словарю курсов."""
     return amount * get_pair_rate(from_code, to_code, rates)
+
+
+def format_rate(rate: float) -> str:
+    """Курс с точностью по величине: 59337.21, 1.0786, 0.00001685."""
+    if rate >= LARGE_RATE_THRESHOLD:
+        return f"{rate:.2f}"
+    if rate >= UNIT_RATE_THRESHOLD:
+        return f"{rate:.4f}"
+    return f"{rate:.8f}"
