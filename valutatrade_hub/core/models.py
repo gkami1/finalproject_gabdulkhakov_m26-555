@@ -7,7 +7,9 @@ from datetime import datetime
 from numbers import Real
 from typing import Any
 
+from valutatrade_hub.core.exceptions import InsufficientFundsError
 from valutatrade_hub.core.utils import (
+    BALANCE_PRECISION,
     BASE_CURRENCY,
     convert,
     validate_amount,
@@ -180,14 +182,12 @@ class Wallet:
         """Снять средства, если баланс позволяет.
 
         Raises:
-            ValueError: сумма некорректна или превышает баланс.
+            ValueError: сумма некорректна.
+            InsufficientFundsError: сумма превышает баланс.
         """
         amount = validate_amount(amount)
         if amount > self._balance:
-            raise ValueError(
-                f"Недостаточно средств: доступно {self._balance:.4f} {self.currency_code}, "
-                f"требуется {amount:.4f} {self.currency_code}"
-            )
+            raise InsufficientFundsError(self._balance, amount, self.currency_code)
         self.balance = self._balance - amount
 
     def get_balance_info(self) -> str:
@@ -196,7 +196,10 @@ class Wallet:
 
     def to_dict(self) -> dict[str, Any]:
         """Словарь для сохранения в составе портфеля."""
-        return {"currency_code": self.currency_code, "balance": self._balance}
+        return {
+            "currency_code": self.currency_code,
+            "balance": round(self._balance, BALANCE_PRECISION),
+        }
 
     def __repr__(self) -> str:
         return f"Wallet({self.currency_code!r}, balance={self._balance})"
@@ -272,7 +275,8 @@ class Portfolio:
         return {
             "user_id": self._user_id,
             "wallets": {
-                code: {"balance": wallet.balance} for code, wallet in self._wallets.items()
+                code: {"balance": round(wallet.balance, BALANCE_PRECISION)}
+                for code, wallet in self._wallets.items()
             },
         }
 

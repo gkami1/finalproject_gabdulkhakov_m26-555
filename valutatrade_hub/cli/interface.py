@@ -1,31 +1,41 @@
 """Командный интерфейс ValutaTrade Hub.
 
 Интерактивная оболочка: разбирает строку команды, вызывает функции
-из ``core.usecases`` и печатает результат. Бизнес-логики здесь нет.
+из ``core.usecases`` и печатает результат. Бизнес-логики здесь нет —
+только разбор аргументов, форматирование и перевод доменных исключений
+в понятные сообщения.
 """
 
 import argparse
+import logging
 import math
 import shlex
 import sys
 from collections.abc import Callable
 
+from prettytable import PrettyTable
+
 from valutatrade_hub.core import usecases
+from valutatrade_hub.core.currencies import CryptoCurrency, get_currency
+from valutatrade_hub.core.exceptions import (
+    ApiRequestError,
+    CurrencyNotFoundError,
+    InsufficientFundsError,
+    ValutaTradeError,
+)
 from valutatrade_hub.core.models import User
+from valutatrade_hub.core.utils import BASE_CURRENCY, format_rate
+from valutatrade_hub.logging_config import setup_logging
 
 PROMPT = "> "
 EXIT_COMMANDS = frozenset({"exit", "quit"})
 SEPARATOR = "-" * 33
 QUOTES = "\"'"
 
-# Подсказка для форматирования: у криптовалют показываем 4 знака после запятой.
-# В части 3 заменится на проверку типа через currencies.get_currency().
-CRYPTO_CODES = frozenset({"BTC", "ETH", "SOL"})
-FIAT_DECIMALS = 2
-CRYPTO_DECIMALS = 4
-LARGE_RATE_THRESHOLD = 100
-UNIT_RATE_THRESHOLD = 1
+DEFAULT_DECIMALS = 2
 AMOUNT_ERROR = "'amount' должен быть положительным числом"
+API_ERROR_HINT = "Повторите попытку позже или проверьте подключение к сети."
+TOP_UP_HINT = "Пополните USD: buy --currency USD --amount <сумма>"
 
 COMMANDS_HELP = (
     ("register --username <имя> --password <пароль>", "регистрация"),
@@ -35,9 +45,12 @@ COMMANDS_HELP = (
     ("buy --currency <код> --amount <кол-во>", "купить валюту (оплата из USD)"),
     ("sell --currency <код> --amount <кол-во>", "продать валюту (выручка в USD)"),
     ("get-rate --from <код> --to <код>", "текущий курс валют"),
+    ("currencies", "список поддерживаемых валют"),
     ("help [команда]", "справка"),
     ("exit", "выход из программы"),
 )
+
+logger = logging.getLogger("valutatrade.cli")
 
 
 class CliUsageError(Exception):
@@ -67,7 +80,10 @@ class CliSession:
 
 
 def _decimals(currency_code: str) -> int:
-    return CRYPTO_DECIMALS if currency_code in CRYPTO_CODES else FIAT_DECIMALS
+    try:
+        return get_currency(currency_code).display_decimals
+    except CurrencyNotFoundError:
+        return DEFAULT_DECIMALS
 
 
 def format_amount(value: float, currency_code: str) -> str:
@@ -78,15 +94,6 @@ def format_amount(value: float, currency_code: str) -> str:
 def format_money(value: float) -> str:
     """Денежная сумма с разделителем тысяч: 2,965.00."""
     return f"{value:,.2f}"
-
-
-def format_rate(rate: float) -> str:
-    """Курс с точностью, зависящей от величины."""
-    if rate >= LARGE_RATE_THRESHOLD:
-        return f"{rate:.2f}"
-    if rate >= UNIT_RATE_THRESHOLD:
-        return f"{rate:.4f}"
-    return f"{rate:.8f}"
 
 
 def _parse_amount(raw: str) -> float:
@@ -176,8 +183,15 @@ def _cmd_get_rate(args: argparse.Namespace, session: CliSession) -> None:
     updated = info.updated_at.astimezone().strftime("%Y-%m-%d %H:%M:%S")
     print(f"Курс {info.from_code}→{info.to_code}: {format_rate(info.rate)} (обновлено: {updated})")
     print(f"Обратный курс {info.to_code}→{info.from_code}: {format_rate(info.inverse_rate)}")
-    if info.is_stale:
-        print("Внимание: источник курсов недоступен, показано последнее сохранённое значение.")
+
+
+def _cmd_currencies(args: argparse.Namespace, session: CliSession) -> None:
+    table = PrettyTable(["Код", "Тип", "Описание"])
+    table.align["Описание"] = "l"
+    for currency in usecases.supported_currencies():
+        kind = "crypto" if isinstance(currency, CryptoCurrency) else "fiat"
+        table.add_row([currency.code, kind, currency.get_display_info()])
+    print(table)
 
 
 Handler = Callable[[argparse.Namespace, CliSession], None]
@@ -209,9 +223,7 @@ def build_parser() -> tuple[_ArgumentParser, dict[str, _ArgumentParser]]:
     add("logout", _cmd_logout, "Выйти из учётной записи.")
 
     portfolio = add("show-portfolio", _cmd_show_portfolio, "Показать портфель.")
-    portfolio.add_argument(
-        "--base", default=usecases.BASE_CURRENCY, help="базовая валюта (по умолчанию USD)"
-    )
+    portfolio.add_argument("--base", default=None, help="базовая валюта (по умолчанию USD)")
 
     for name, handler, description in (
         ("buy", _cmd_buy, "Купить валюту. Стоимость списывается с USD-кошелька."),
@@ -224,6 +236,8 @@ def build_parser() -> tuple[_ArgumentParser, dict[str, _ArgumentParser]]:
     rate = add("get-rate", _cmd_get_rate, "Показать курс одной валюты к другой.")
     rate.add_argument("--from", dest="from_code", required=True, help="исходная валюта")
     rate.add_argument("--to", dest="to_code", required=True, help="целевая валюта")
+
+    add("currencies", _cmd_currencies, "Показать поддерживаемые валюты.")
 
     return parser, commands
 
@@ -262,6 +276,35 @@ def _configure_utf8() -> None:
             reconfigure(encoding="utf-8", errors="replace")
 
 
+def _run_command(
+    name: str, tokens: list[str], session: CliSession, parser: _ArgumentParser
+) -> None:
+    """Разобрать аргументы, выполнить команду и показать ошибки по их типу."""
+    try:
+        args = parser.parse_args(tokens)
+        args.handler(args, session)
+    except CliUsageError as exc:
+        print(f"Ошибка в аргументах: {exc}. Справка: help {name}")
+    except SystemExit:
+        pass  # argparse завершает работу после вывода --help
+    except InsufficientFundsError as exc:
+        print(exc)
+        if name == "buy" and exc.code == BASE_CURRENCY:
+            print(TOP_UP_HINT)
+    except CurrencyNotFoundError as exc:
+        print(exc)
+        codes = ", ".join(usecases.supported_currency_codes())
+        print(f"Поддерживаемые валюты: {codes}. Подробнее: currencies, help get-rate")
+    except ApiRequestError as exc:
+        print(exc)
+        print(API_ERROR_HINT)
+    except (ValutaTradeError, ValueError) as exc:
+        print(exc)
+    except Exception as exc:
+        logger.exception("Непредвиденная ошибка в команде %s", name)
+        print(f"Непредвиденная ошибка: {exc}. Подробности в logs/actions.log")
+
+
 def execute(
     line: str,
     session: CliSession,
@@ -282,26 +325,17 @@ def execute(
         return False
     if name == "help":
         print_help(commands, tokens[1] if len(tokens) > 1 else None)
-        return True
-    if name not in commands:
+    elif name in commands:
+        _run_command(name, tokens, session, parser)
+    else:
         print(f"Неизвестная команда '{name}'. Введите help для списка команд.")
-        return True
-
-    try:
-        args = parser.parse_args(tokens)
-        args.handler(args, session)
-    except CliUsageError as exc:
-        print(f"Ошибка в аргументах: {exc}. Справка: help {name}")
-    except SystemExit:
-        pass  # argparse завершает работу после вывода --help
-    except ValueError as exc:
-        print(exc)
     return True
 
 
 def main() -> None:
     """Точка входа: интерактивная оболочка ValutaTrade Hub."""
     _configure_utf8()
+    setup_logging()
     parser, commands = build_parser()
     session = CliSession()
     print("ValutaTrade Hub. Введите help для списка команд, exit — для выхода.")
