@@ -14,6 +14,7 @@ dependencies = [
 dev = ["ruff>=0.6"]
 
 [project.scripts]
+project = "valutatrade_hub.cli.interface:main"
 valutatrade = "valutatrade_hub.cli.interface:main"
 
 [build-system]
