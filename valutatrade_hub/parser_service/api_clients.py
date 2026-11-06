@@ -161,9 +161,10 @@ class ExchangeRateApiClient(BaseApiClient):
         if not isinstance(payload, dict) or payload.get("result") != "success":
             raise ApiRequestError(self._body_error_reason(payload))
 
-        quoted = payload.get("rates")
+        # v6 отдаёт курсы в "conversion_rates", открытый API — в "rates"
+        quoted = payload.get("conversion_rates") or payload.get("rates")
         if not isinstance(quoted, dict):
-            raise ApiRequestError("в ответе нет словаря rates")
+            raise ApiRequestError("в ответе нет словаря conversion_rates")
         rates = {}
         for code in self.config.FIAT_CURRENCIES:
             value = quoted.get(code)
